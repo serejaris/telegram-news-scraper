@@ -120,9 +120,8 @@ async def search_sources(query: str, num_results: int = 3) -> list[dict]:
             return exa_client.search_and_contents(
                 query,
                 type="auto",
-                use_autoprompt=True,
                 num_results=num_results,
-                highlights=True
+                contents={"highlights": True}
             )
 
         result = await asyncio.to_thread(sync_search)
