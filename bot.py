@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -5,6 +6,7 @@ from telegram import Update, BotCommand
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import AsyncOpenAI
+from exa_py import Exa
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -13,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # AI Configuration (loaded in main())
 ai_client = None
+exa_client = None
 AI_MODEL = "google/gemini-2.0-flash-exp:free"
 AI_SYSTEM_PROMPT = "Ты Гарри Поттер, который общается в стихотворной форме."
 MAX_MESSAGE_LENGTH = 4096
@@ -20,8 +23,25 @@ MAX_MESSAGE_LENGTH = 4096
 
 def markdown_to_html(text: str) -> str:
     """Convert markdown to Telegram HTML format."""
-    # Escape HTML entities first
+    # Extract and preserve markdown links BEFORE escaping HTML
+    links = []
+
+    def preserve_link(match):
+        link_text = match.group(1)
+        link_url = match.group(2)
+        placeholder = f"__LINK_{len(links)}__"
+        links.append((link_text, link_url))
+        return placeholder
+
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', preserve_link, text)
+
+    # Escape HTML entities
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # Restore links as HTML <a> tags
+    for i, (link_text, link_url) in enumerate(links):
+        escaped_text = link_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"__LINK_{i}__", f'<a href="{link_url}">{escaped_text}</a>')
 
     # Headers: ### -> <b>
     text = re.sub(r'^###\s*(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
@@ -69,6 +89,63 @@ def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
     return chunks
 
 
+SKIP_SEARCH_WORDS = {"привет", "здравствуй", "хай", "hi", "hello", "спасибо", "благодарю",
+                     "ок", "ok", "да", "нет", "пока", "bye", "хорошо", "понял", "ясно"}
+
+
+def should_search(text: str) -> bool:
+    """Determine if we should search for sources."""
+    if not exa_client:
+        return False
+    if len(text) < 15:
+        return False
+    if text.lower().strip().rstrip("!?.") in SKIP_SEARCH_WORDS:
+        return False
+    return True
+
+
+async def search_sources(query: str, num_results: int = 3) -> list[dict]:
+    """Search for sources using Exa AI."""
+    try:
+        result = await asyncio.to_thread(
+            exa_client.search_and_contents,
+            query,
+            type="neural",
+            use_autoprompt=True,
+            num_results=num_results,
+            highlights=True
+        )
+        sources = []
+        for r in result.results:
+            sources.append({
+                "title": r.title or "Без названия",
+                "url": r.url,
+                "highlight": r.highlights[0] if r.highlights else "",
+                "date": getattr(r, "published_date", None)
+            })
+        return sources
+    except Exception as e:
+        logger.warning(f"Exa search failed: {e}")
+        return []
+
+
+def build_prompt_with_sources(query: str, sources: list[dict]) -> str:
+    """Build system prompt with source context."""
+    if not sources:
+        return AI_SYSTEM_PROMPT
+
+    sources_text = "\n".join([
+        f"- [{s['title']}]({s['url']}): {s['highlight']}"
+        for s in sources
+    ])
+    return f"""{AI_SYSTEM_PROMPT}
+
+У тебя есть доступ к следующим источникам по теме запроса:
+{sources_text}
+
+Используй эти источники в ответе, если они релевантны. В конце ответа добавь раздел "Источники:" со ссылками в формате markdown [название](url). Если источники нерелевантны — не упоминай их."""
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     help_text = (
@@ -93,10 +170,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
+        # Search for sources if needed
+        sources = []
+        if should_search(user_text):
+            await thinking_msg.edit_text("🔍 Ищу источники...")
+            sources = await search_sources(user_text)
+            await thinking_msg.edit_text("🤔 Анализирую...")
+
+        system_prompt = build_prompt_with_sources(user_text, sources)
+
         response = await ai_client.chat.completions.create(
             model=AI_MODEL,
             messages=[
-                {"role": "system", "content": AI_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_text}
             ]
         )
@@ -130,7 +216,7 @@ async def post_init(application: Application) -> None:
 
 def main() -> None:
     """Start the bot."""
-    global ai_client, AI_MODEL, AI_SYSTEM_PROMPT
+    global ai_client, exa_client, AI_MODEL, AI_SYSTEM_PROMPT
 
     # Load config from .env file
     env_vars = {}
@@ -159,6 +245,14 @@ def main() -> None:
         logger.info(f"AI enabled with model: {AI_MODEL}")
     else:
         logger.warning("OPENROUTER_API_KEY not set - AI chat disabled")
+
+    # Initialize Exa client for source search
+    exa_key = env_vars.get("EXA_API_KEY") or os.getenv("EXA_API_KEY")
+    if exa_key:
+        exa_client = Exa(api_key=exa_key)
+        logger.info("Exa search enabled")
+    else:
+        logger.warning("EXA_API_KEY not set - source search disabled")
 
     application = Application.builder().token(token).post_init(post_init).build()
 
