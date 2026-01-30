@@ -96,16 +96,22 @@ SKIP_SEARCH_WORDS = {"привет", "здравствуй", "хай", "hi", "he
 def should_search(text: str) -> bool:
     """Determine if we should search for sources."""
     if not exa_client:
+        logger.warning("should_search: False - exa_client is None (EXA_API_KEY missing?)")
         return False
     if len(text) < 15:
+        logger.info(f"should_search: False - text too short ({len(text)} < 15 chars)")
         return False
-    if text.lower().strip().rstrip("!?.") in SKIP_SEARCH_WORDS:
+    normalized = text.lower().strip().rstrip("!?.")
+    if normalized in SKIP_SEARCH_WORDS:
+        logger.info(f"should_search: False - skip word '{normalized}'")
         return False
+    logger.info(f"should_search: True - text length {len(text)} chars")
     return True
 
 
 async def search_sources(query: str, num_results: int = 3) -> list[dict]:
     """Search for sources using Exa AI."""
+    logger.info(f"Exa search starting: '{query[:50]}...' (requesting {num_results} results)")
     try:
         result = await asyncio.to_thread(
             exa_client.search_and_contents,
@@ -123,9 +129,12 @@ async def search_sources(query: str, num_results: int = 3) -> list[dict]:
                 "highlight": r.highlights[0] if r.highlights else "",
                 "date": getattr(r, "published_date", None)
             })
+        logger.info(f"Exa search completed: found {len(sources)} sources")
+        for i, s in enumerate(sources):
+            logger.debug(f"  Source {i+1}: {s['title'][:40]}... ({s['url'][:50]})")
         return sources
     except Exception as e:
-        logger.warning(f"Exa search failed: {e}")
+        logger.error(f"Exa search failed: {type(e).__name__}: {e}")
         return []
 
 
@@ -172,10 +181,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         # Search for sources if needed
         sources = []
-        if should_search(user_text):
+        do_search = should_search(user_text)
+        logger.info(f"Message from {update.effective_user.id}: '{user_text[:30]}...' | search={do_search}")
+        if do_search:
             await thinking_msg.edit_text("🔍 Ищу источники...")
             sources = await search_sources(user_text)
+            logger.info(f"Search returned {len(sources)} sources")
             await thinking_msg.edit_text("🤔 Анализирую...")
+        else:
+            logger.info("Skipping search (see debug logs for reason)")
 
         system_prompt = build_prompt_with_sources(user_text, sources)
 
@@ -250,9 +264,10 @@ def main() -> None:
     exa_key = env_vars.get("EXA_API_KEY") or os.getenv("EXA_API_KEY")
     if exa_key:
         exa_client = Exa(api_key=exa_key)
-        logger.info("Exa search enabled")
+        masked_key = exa_key[:8] + "..." + exa_key[-4:] if len(exa_key) > 12 else "***"
+        logger.info(f"Exa search enabled (key: {masked_key})")
     else:
-        logger.warning("EXA_API_KEY not set - source search disabled")
+        logger.warning("EXA_API_KEY not set - source search disabled (exa_client=None)")
 
     application = Application.builder().token(token).post_init(post_init).build()
 
