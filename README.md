@@ -1,12 +1,12 @@
-# Telegram Music Bot
+# Telegram AI Chat Bot
 
-Телеграм-бот с подборкой песен и AI-чатом.
+Телеграм-бот с AI-чатом через OpenRouter.
 
 ## Возможности
 
-- Песни по жанрам (rock, pop, jazz, electronic, classical)
-- Ежедневная рассылка "Песня дня" в 20:00 UTC
 - AI-чат через OpenRouter (любая модель: DeepSeek, Claude, GPT, Gemini)
+- Настраиваемый системный промпт
+- "Думаю..." индикатор во время обработки
 
 ## Архитектура
 
@@ -17,9 +17,8 @@ flowchart TB
     end
 
     subgraph Bot["bot.py"]
-        CMD[Command Handlers]
+        CMD[/start handler]
         MSG[Message Handler]
-        SCHED[Job Queue]
     end
 
     subgraph External
@@ -27,25 +26,17 @@ flowchart TB
         OR_API[OpenRouter API]
     end
 
-    subgraph Storage
-        USERS[(users.json)]
-    end
-
-    User -->|/start, /rock, etc| TG_API
+    User -->|/start| TG_API
     User -->|text message| TG_API
     TG_API --> CMD
     TG_API --> MSG
 
-    CMD -->|subscribe/unsubscribe| USERS
-    CMD -->|song response| TG_API
+    CMD -->|welcome| TG_API
 
     MSG -->|"🤔 Думаю..."| TG_API
     MSG -->|chat request| OR_API
     OR_API -->|AI response| MSG
     MSG -->|edit message| TG_API
-
-    SCHED -->|daily 20:00 UTC| USERS
-    SCHED -->|broadcast song| TG_API
 
     TG_API --> User
 ```
@@ -67,24 +58,8 @@ sequenceDiagram
     B->>O: chat.completions.create()
     O-->>B: AI response
     B->>T: edit_message(response)
-    T->>U: AI ответ в стихах
+    T->>U: AI ответ
 ```
-
-## Команды
-
-| Команда | Описание |
-|---------|----------|
-| `/start` | Подписка на ежедневные песни |
-| `/stop` | Отписка |
-| `/rock` | Рок-песня |
-| `/pop` | Поп-музыка |
-| `/jazz` | Джаз |
-| `/electronic` | Электроника |
-| `/classical` | Классика |
-| `/random` | Случайная песня |
-| `/test` | Тестовая рассылка |
-
-Любое текстовое сообщение (не команда) — отправляется AI.
 
 ## Установка
 
@@ -118,10 +93,3 @@ AI_SYSTEM_PROMPT=Ты помощник...            # Системный про
 ```
 
 Доступные модели: `google/gemini-2.0-flash-exp:free`, `deepseek/deepseek-chat`, `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.3-70b-instruct:free`
-
-## Деплой
-
-Бот должен работать постоянно для ежедневных рассылок:
-- [Railway](https://railway.app)
-- [Heroku](https://heroku.com)
-- VPS
