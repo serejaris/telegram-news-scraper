@@ -113,14 +113,21 @@ async def search_sources(query: str, num_results: int = 3) -> list[dict]:
     """Search for sources using Exa AI."""
     logger.info(f"Exa search starting: '{query[:50]}...' (requesting {num_results} results)")
     try:
-        result = await asyncio.to_thread(
-            exa_client.search_and_contents,
-            query,
-            type="auto",
-            use_autoprompt=True,
-            num_results=num_results,
-            highlights=True
-        )
+        logger.info("Calling Exa API via asyncio.to_thread...")
+
+        def sync_search():
+            logger.info("Inside sync_search thread")
+            return exa_client.search_and_contents(
+                query,
+                type="auto",
+                use_autoprompt=True,
+                num_results=num_results,
+                highlights=True
+            )
+
+        result = await asyncio.to_thread(sync_search)
+        logger.info(f"Exa API returned, processing {len(result.results)} results")
+
         sources = []
         for r in result.results:
             sources.append({
@@ -130,11 +137,11 @@ async def search_sources(query: str, num_results: int = 3) -> list[dict]:
                 "date": getattr(r, "published_date", None)
             })
         logger.info(f"Exa search completed: found {len(sources)} sources")
-        for i, s in enumerate(sources):
-            logger.debug(f"  Source {i+1}: {s['title'][:40]}... ({s['url'][:50]})")
         return sources
     except Exception as e:
+        import traceback
         logger.error(f"Exa search failed: {type(e).__name__}: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return []
 
 
