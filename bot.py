@@ -1,6 +1,8 @@
 import logging
 import os
+import re
 from telegram import Update, BotCommand
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 
@@ -13,6 +15,58 @@ logger = logging.getLogger(__name__)
 ai_client = None
 AI_MODEL = "google/gemini-2.0-flash-exp:free"
 AI_SYSTEM_PROMPT = "Ты Гарри Поттер, который общается в стихотворной форме."
+MAX_MESSAGE_LENGTH = 4096
+
+
+def markdown_to_html(text: str) -> str:
+    """Convert markdown to Telegram HTML format."""
+    # Escape HTML entities first
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # Headers: ### -> <b>
+    text = re.sub(r'^###\s*(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    text = re.sub(r'^##\s*(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    text = re.sub(r'^#\s*(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+
+    # Bold: **text** -> <b>text</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+
+    # Italic: *text* -> <i>text</i>
+    text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', text)
+
+    # Code blocks: ```code``` -> <pre>code</pre>
+    text = re.sub(r'```[\w]*\n?(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
+
+    # Inline code: `code` -> <code>code</code>
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+
+    return text
+
+
+def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
+    """Split long message into chunks respecting paragraph boundaries."""
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= max_length:
+            chunks.append(text)
+            break
+
+        # Find split point: prefer double newline, then single newline, then space
+        split_at = text.rfind('\n\n', 0, max_length)
+        if split_at == -1:
+            split_at = text.rfind('\n', 0, max_length)
+        if split_at == -1:
+            split_at = text.rfind(' ', 0, max_length)
+        if split_at == -1:
+            split_at = max_length
+
+        chunks.append(text[:split_at].strip())
+        text = text[split_at:].strip()
+
+    return chunks
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -47,7 +101,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]
         )
         ai_response = response.choices[0].message.content
-        await thinking_msg.edit_text(ai_response)
+        html_response = markdown_to_html(ai_response)
+        chunks = split_message(html_response)
+
+        # Edit first message with first chunk
+        await thinking_msg.edit_text(chunks[0], parse_mode=ParseMode.HTML)
+
+        # Send remaining chunks as new messages
+        for chunk in chunks[1:]:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"AI error: {e}")
         await thinking_msg.edit_text("❌ Не удалось получить ответ")
